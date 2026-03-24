@@ -1,545 +1,381 @@
 # C-BitBoard
 
-A chess move generator and perft validator written in C11. The idea is simple:
-represent the entire chessboard as a 64-bit integer and use bitwise operations
-to generate moves for every piece type at once, instead of looping square by
-square. The result is a generator that can enumerate all legal moves from any
-position in microseconds, validated against known node counts up to depth 6
-(119 million nodes).
+A pseudo-legal chess move generator written in C, using 64-bit bitboards and the Hyperbola Quintessence algorithm for sliding piece attacks. Includes perft validation to depth 6 (119,060,324 nodes from the starting position), FEN parsing, full make/unmake with undo, and a perft-divide command for debugging move generators.
+
+[![C](https://img.shields.io/badge/C-C11-555555.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
 ## Table of Contents
 
-- [What is a Bitboard](#what-is-a-bitboard)
-- [Board Representation](#board-representation)
-- [How Move Generation Works](#how-move-generation-works)
-  - [Pawn Moves](#pawn-moves)
-  - [Knight Moves](#knight-moves)
-  - [Sliding Pieces](#sliding-pieces)
-  - [Castling](#castling)
+- [What Are Bitboards](#what-are-bitboards)
+- [Hyperbola Quintessence](#hyperbola-quintessence)
+- [Rank Attack Lookup Table](#rank-attack-lookup-table)
 - [Move Encoding](#move-encoding)
-- [Perft Validation](#perft-validation)
-- [Build and Usage](#build-and-usage)
-- [Project Structure](#project-structure)
+- [Piece Attack Tables](#piece-attack-tables)
+- [Pawn Move Generation](#pawn-move-generation)
+- [Pseudo-Legal vs Legal Move Generation](#pseudo-legal-vs-legal-move-generation)
+- [Perft Testing](#perft-testing)
+- [FEN Parsing](#fen-parsing)
+- [Make/Unmake and Undo](#makeunmake-and-undo)
+- [Project Layout](#project-layout)
+- [Building](#building)
+- [Usage](#usage)
+- [Known Perft Results](#known-perft-results)
+- [License](#license)
 
 ---
 
-## What is a Bitboard
+## What Are Bitboards
 
-A bitboard is a 64-bit integer where each bit corresponds to one square on the
-board. Bit 0 is a1, bit 63 is h8. If the bit is 1, something is on that square.
-If it is 0, the square is empty.
+A bitboard is a 64-bit integer (`uint64_t`) where each bit represents one square on the chess board. Bit 0 = a1, bit 1 = b1, ..., bit 63 = h8 (little-endian rank-file mapping).
 
 ```
-Square indices:
-
-  a    b    c    d    e    f    g    h
-+----+----+----+----+----+----+----+----+
-| 56 | 57 | 58 | 59 | 60 | 61 | 62 | 63 |  rank 8
-+----+----+----+----+----+----+----+----+
-| 48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 |  rank 7
-+----+----+----+----+----+----+----+----+
-| 40 | 41 | 42 | 43 | 44 | 45 | 46 | 47 |  rank 6
-+----+----+----+----+----+----+----+----+
-| 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 |  rank 5
-+----+----+----+----+----+----+----+----+
-| 24 | 25 | 26 | 27 | 28 | 29 | 30 | 31 |  rank 4
-+----+----+----+----+----+----+----+----+
-| 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 |  rank 3
-+----+----+----+----+----+----+----+----+
-|  8 |  9 | 10 | 11 | 12 | 13 | 14 | 15 |  rank 2
-+----+----+----+----+----+----+----+----+
-|  0 |  1 |  2 |  3 |  4 |  5 |  6 |  7 |  rank 1
-+----+----+----+----+----+----+----+----+
-
-sq = rank * 8 + file    (rank 0 = rank 1, file 0 = file a)
+bit index layout:
+56 57 58 59 60 61 62 63   ← rank 8 (a8 ... h8)
+48 49 50 51 52 53 54 55
+40 41 42 43 44 45 46 47
+32 33 34 35 36 37 38 39
+24 25 26 27 28 29 30 31
+16 17 18 19 20 21 22 23
+ 8  9 10 11 12 13 14 15
+ 0  1  2  3  4  5  6  7   ← rank 1 (a1 ... h1)
 ```
 
-So all eight white pawns on rank 2 are just one integer: `0x000000000000FF00`.
+This representation lets the CPU perform set operations on up to 64 squares simultaneously using native 64-bit instructions:
+
+| Chess operation | Bitboard operation |
+|---|---|
+| Union of two square sets | `a \| b` |
+| Intersection | `a & b` |
+| Complement (invert) | `~a` |
+| Shift all squares north one rank | `bb << 8` |
+| Count pieces | `__builtin_popcountll(bb)` |
+| Extract lowest set square | `__builtin_ctzll(bb)` |
+
+The board state stores one bitboard per piece type per color: `pieces[2][6]`, where color is 0 (white) or 1 (black) and piece type is pawn/knight/bishop/rook/queen/king. Two aggregate bitboards, `by_color[2]` and `occupied`, are derived from these and kept in sync.
+
+---
+
+## Hyperbola Quintessence
+
+Hyperbola Quintessence (HQ) is a branchless method for computing sliding piece attacks (bishops, rooks, queens) along a ray given the current occupancy.
+
+### The Formula
+
+For a slider on square `sq`, an occupancy bitboard `occ`, and a ray mask `mask`:
 
 ```
-White pawns at startup:
+o  = occ & mask          (occupied squares along this ray)
+r  = byteswap(o)         (reverse the bit order)
+rs = sq ^ 56             (reversed square index)
 
-  a  b  c  d  e  f  g  h
-+--+--+--+--+--+--+--+--+
-|  |  |  |  |  |  |  |  |  rank 8
-|  |  |  |  |  |  |  |  |  rank 7
-|  |  |  |  |  |  |  |  |  rank 6
-|  |  |  |  |  |  |  |  |  rank 5
-|  |  |  |  |  |  |  |  |  rank 4
-|  |  |  |  |  |  |  |  |  rank 3
-| P| P| P| P| P| P| P| P|  rank 2   bits 8-15 all set
-|  |  |  |  |  |  |  |  |  rank 1
-
-0x000000000000FF00
-= 00000000 00000000 00000000 00000000
-  00000000 00000000 11111111 00000000
+attacks = mask & ( (o - 2*r(sq)) ^ byteswap(r - 2*r(rs)) )
 ```
 
-The engine stores 12 of these — one per piece type per color:
+where `r(sq)` means "the single-bit mask for square sq".
 
-```
-pieces[WHITE][PAWN]    pieces[BLACK][PAWN]
-pieces[WHITE][KNIGHT]  pieces[BLACK][KNIGHT]
-pieces[WHITE][BISHOP]  pieces[BLACK][BISHOP]
-pieces[WHITE][ROOK]    pieces[BLACK][ROOK]
-pieces[WHITE][QUEEN]   pieces[BLACK][QUEEN]
-pieces[WHITE][KING]    pieces[BLACK][KING]
-```
+**Why it works:** The expression `o - 2*r(sq)` propagates a borrow through the occupancy bits, producing a mask of all squares the slider can reach in one direction along the ray before hitting the first blocker (inclusive). The byteswap trick applies the same calculation in the reverse direction by literally reversing the bit order of the board. XOR-ing the two halves and masking to the ray gives the complete attack set in both directions simultaneously.
 
-Two derived boards are kept in sync after every move:
+**Implementation (from `bitboard.h`):**
 
 ```c
-by_color[WHITE] = union of all white piece boards
-by_color[BLACK] = union of all black piece boards
-occupied        = by_color[WHITE] | by_color[BLACK]
+static inline Bitboard hq_attacks(Bitboard occ, int sq, Bitboard mask) {
+    Bitboard o  = occ & mask;
+    Bitboard r  = __builtin_bswap64(o);
+    int      rs = sq ^ 56;
+    return mask & (
+        (o  - (bb_sq(sq) << 1)) ^
+        __builtin_bswap64(r - (bb_sq(rs) << 1))
+    );
+}
 ```
 
----
+This works correctly for diagonal and file rays. Rank rays require a different approach (see below).
 
-## Board Representation
+### Applying HQ to Piece Types
 
 ```c
-typedef struct {
-    Bitboard pieces[2][6];
-    Bitboard occupied;
-    Bitboard by_color[2];
-    Color    side;
-    int      ep_sq;       // en passant target square, or NO_SQ
-    uint8_t  castling;    // bit 0=WK  1=WQ  2=BK  3=BQ
-    int      halfmove;
-    int      fullmove;
-} Position;
-```
+// Bishop: diagonal + anti-diagonal rays
+Bitboard bishop_attacks(Bitboard occ, int sq) {
+    return hq_attacks(occ, sq, DIAG_MASK[sq])
+         | hq_attacks(occ, sq, ANTI_DIAG_MASK[sq]);
+}
 
-Parsing `rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1` fills
-the struct directly:
+// Rook: file ray (HQ) + rank ray (lookup table)
+Bitboard rook_attacks(Bitboard occ, int sq) {
+    return hq_attacks(occ, sq, FILE_MASK_SQ[sq])
+         | rank_attacks(occ, sq);
+}
 
-```
-  +---+---+---+---+---+---+---+---+
-8 | r | n | b | q | k | b | n | r |
-  +---+---+---+---+---+---+---+---+
-7 | p | p | p | p | p | p | p | p |
-  +---+---+---+---+---+---+---+---+
-6 | . | . | . | . | . | . | . | . |
-  +---+---+---+---+---+---+---+---+
-5 | . | . | . | . | . | . | . | . |
-  +---+---+---+---+---+---+---+---+
-4 | . | . | . | . | . | . | . | . |
-  +---+---+---+---+---+---+---+---+
-3 | . | . | . | . | . | . | . | . |
-  +---+---+---+---+---+---+---+---+
-2 | P | P | P | P | P | P | P | P |
-  +---+---+---+---+---+---+---+---+
-1 | R | N | B | Q | K | B | N | R |
-  +---+---+---+---+---+---+---+---+
-    a   b   c   d   e   f   g   h
-Side: white  Castle: KQkq  EP: -
+// Queen: combination
+Bitboard queen_attacks(Bitboard occ, int sq) {
+    return bishop_attacks(occ, sq) | rook_attacks(occ, sq);
+}
 ```
 
 ---
 
-## How Move Generation Works
+## Rank Attack Lookup Table
 
-### Pawn Moves
+HQ uses `__builtin_bswap64` (byte swap) to reverse bits. Byte swap reverses the order of bytes, not individual bits within bytes. For diagonal and file rays, where squares within a ray span multiple bytes, this works correctly. For rank rays, where all 8 squares lie within a single byte of the board, byte-swapping does not reverse bit order within that byte — so HQ gives wrong results for horizontal rays.
 
-Rather than iterating over each pawn, all pawns of the same color are shifted
-together in a single operation. One shift moves every pawn on the board forward
-at once.
+The solution is a precomputed 8×256 lookup table: `rank_attacks_lut[file][occ8]`.
 
-```
-Single push: shift the whole pawn board left by 8, mask out occupied squares.
+- **`file`** (0–7): the file of the attacking piece.
+- **`occ8`** (0–255): the 8-bit occupancy of the rank, one bit per file.
 
-  a  b  c  d  e  f  g  h        a  b  c  d  e  f  g  h
-+--+--+--+--+--+--+--+--+      +--+--+--+--+--+--+--+--+
-|  |  |  |  |  |  |  |  | 8   |  |  |  |  |  |  |  |  | 8
-|  |  |  |  |  |  |  |  | 7   |  |  |  |  |  |  |  |  | 7
-|  |  |  |  |  |  |  |  | 6   |  |  |  |  |  |  |  |  | 6
-|  |  |  |  |  |  |  |  | 5   |  |  |  |  |  |  |  |  | 5
-|  |  |  |  |  |  |  |  | 4   |  |  |  |  |  |  |  |  | 4
-|  |  |  |  |  |  |  |  | 3   | *| *| *| *| *| *| *| *| 3  <-- destinations
-| P| P| P| P| P| P| P| P| 2   |  |  |  |  |  |  |  |  | 2
-|  |  |  |  |  |  |  |  | 1   |  |  |  |  |  |  |  |  | 1
-
-                   pawns << 8  &  ~occupied
-```
-
-Double push sends the single-push result one more rank, but only keeps squares
-on rank 4 — guaranteeing the pawn started on rank 2 and both intermediate
-squares were clear:
+The lookup returns an 8-bit mask of squares attacked along that rank, which is then shifted to the correct rank of the board:
 
 ```c
-single_push = (pawns << 8) & ~occupied;
-double_push = (single_push << 8) & RANK_4 & ~occupied;
+static inline Bitboard rank_attacks(Bitboard occ, int sq) {
+    int rank  = SQ_RANK(sq);
+    int file  = SQ_FILE(sq);
+    uint8_t occ8 = (uint8_t)((occ >> (rank * 8)) & 0xFF);
+    return (Bitboard)rank_attacks_lut[file][occ8] << (rank * 8);
+}
 ```
 
-Diagonal shifts handle captures, with file masks to stop wrapping at the edges:
-
-```
-Pawn on e4.  Left capture = << 7, right capture = << 9.
-
-    d  e  f
-  +--+--+--+
-5 | *|  | *|   capture targets (only if an enemy piece is there)
-  +--+--+--+
-4 |  | P|  |
-  +--+--+--+
-
-pawns << 7  &  ~FILE_H  &  enemy   =  left  capture squares
-pawns << 9  &  ~FILE_A  &  enemy   =  right capture squares
-```
-
-Promotions are detected when any destination lands on rank 8. Four moves are
-generated per promoting pawn (N, B, R, Q).
-
----
-
-### Knight Moves
-
-The eight possible knight jumps are precomputed for all 64 squares at startup.
-Each entry is the set of squares a knight can reach from that square.
-
-```
-Knight on d4 (sq 27):
-
-  a  b  c  d  e  f  g  h
-+--+--+--+--+--+--+--+--+
-|  |  |  |  |  |  |  |  | 8
-|  |  |  |  |  |  |  |  | 7
-|  |  | *|  | *|  |  |  | 6   +15, +17
-|  | *|  |  |  | *|  |  | 5    +6, +10
-|  |  |  | N|  |  |  |  | 4
-|  | *|  |  |  | *|  |  | 3    -6, -10
-|  |  | *|  | *|  |  |  | 2   -15, -17
-|  |  |  |  |  |  |  |  | 1
-```
-
-Each of the eight shifts needs a file-edge mask to prevent wrap-around. For
-example, a knight on h4 shifted by +17 would land on bit 48 which is a1 on
-rank 7 — impossible geometrically. Masking against FILE_A zeroes out any
-result that illegally crosses the left edge:
-
-```c
-(b << 17) & ~FILE_A   // +2 ranks, +1 file: mask prevents a-file wrapping
-(b << 15) & ~FILE_H   // +2 ranks, -1 file: mask prevents h-file wrapping
-```
-
-At runtime, looking up a knight's attacks is just one table access:
-
-```c
-Bitboard attacks = KNIGHT_ATTACKS[sq] & ~own_pieces;
-```
-
----
-
-### Sliding Pieces
-
-Bishops, rooks, and queens cast rays out from their square until hitting a
-blocker. The tricky part is that the blocking square depends on the current
-board occupancy, which changes every move.
-
-This engine uses **Hyperbola Quintessence** — a five-operation formula that
-computes attacks in both directions along a ray simultaneously:
-
-```
-o  = occupied squares on this ray
-r  = the slider's own bit
-rs = the slider's bit in the vertically-mirrored board
-
-attacks = ((o - 2r)  XOR  reverse(reverse(o) - 2*reverse(r)))  AND  ray_mask
-```
-
-Worked example — rook on e4, looking up and down the e-file:
-
-```
-e-file, occupied squares:
-
-  e
-+--+
-| p|  sq 52  (enemy pawn)
-|  |  sq 44
-|  |  sq 36
-| R|  sq 28  (the rook)
-|  |  sq 20
-| P|  sq 12  (own pawn)
-| K|  sq 4   (own king)
-+--+
-
-o = bits {4, 12, 28, 52}
-
-Forward (toward rank 8): subtract 2*bit(28) from o.
-The borrow cascades through empty squares and stops at the
-first occupied square above the rook.
-
-Backward (toward rank 1): mirror the board vertically via bswap64,
-apply the same subtraction, mirror back.
-
-XOR combines both directions:
-
-  e
-+--+
-| *|  sq 52  attacks enemy pawn (capture square)
-| *|  sq 44
-| *|  sq 36
-|   |  sq 28  the rook itself (excluded later via & ~own_pieces)
-| *|  sq 20
-| *|  sq 12  attacks own pawn (excluded later via & ~own_pieces)
-|   |  sq 4   blocked by own pawn above -- cannot reach king
-+--+
-```
-
-The bswap64 trick works for files, diagonals, and anti-diagonals because
-mirroring byte order correctly maps each square to its rank-mirrored
-counterpart (`sq XOR 56`). Rank (horizontal) rays are different: all
-squares of a rank share one byte, so bswap moves the whole byte to a
-different position without reversing bit order within it. Rank attacks
-use a 2 KB lookup table instead:
-
-```
-rank_attacks_lut[file][8-bit occupancy of the rank]
-
-Example: slider on file e (index 4), rank occupancy = 10110101
-
-  a  b  c  d  e  f  g  h
-  1  0  1  1  .  1  0  1   (dot = slider's own square, not counted)
-
-Forward scan from e toward h: f is occupied -> stop at f, attack f
-Backward scan from e toward a: d is occupied -> stop at d, attack d
-
-Result: attacks d and f only
-
-  a  b  c  d  e  f  g  h
-  0  0  0  1  0  1  0  0
-```
-
----
-
-### Castling
-
-Three conditions must hold before castling is legal:
-
-```
-White kingside (e1 -> g1):
-
-  a  b  c  d  e  f  g  h
-+--+--+--+--+--+--+--+--+
-|  |  |  |  | K|  |  | R|   before
-+--+--+--+--+--+--+--+--+
-
-1. Castling right flag set (neither king nor rook has moved)
-2. f1 and g1 are empty
-3. e1, f1, g1 are not attacked by black (king cannot pass through check)
-
-+--+--+--+--+--+--+--+--+
-|  |  |  |  |  | R| K|  |   after
-+--+--+--+--+--+--+--+--+
-
-
-White queenside (e1 -> c1):
-
-+--+--+--+--+--+--+--+--+
-| R|  |  |  | K|  |  |  |   before
-+--+--+--+--+--+--+--+--+
-
-1. Castling right flag set
-2. b1, c1, d1 are empty
-3. c1, d1, e1 are not attacked by black
-   (b1 only needs to be empty, not unattacked)
-
-+--+--+--+--+--+--+--+--+
-|  |  | K| R|  |  |  |  |   after
-+--+--+--+--+--+--+--+--+
-```
-
-When checking whether the king's path is attacked, the king is temporarily
-removed from the occupancy so sliding pieces are not incorrectly blocked by
-the king itself when evaluating f1 and g1.
+The table is populated once in `init_tables()` by iterating over all 8 files × 256 occupancy patterns.
 
 ---
 
 ## Move Encoding
 
-Each move is packed into a 32-bit integer:
+Each move is a 32-bit integer packed as follows:
 
 ```
-Bit layout:
-
-  [18][17][16][15][14][13:12][11:6][5:0]
-   |   |   |   |   |    |      |     |
-   |   |   |   |   |    |      |     from square (0-63)
-   |   |   |   |   |    |      to square   (0-63)
-   |   |   |   |   |    promotion piece (0=N 1=B 2=R 3=Q)
-   |   |   |   |   capture flag
-   |   |   |   promotion flag
-   |   |   en passant flag
-   |   castling flag
-   double pawn push flag
+bits  5– 0:  from square (0–63)
+bits 11– 6:  to square   (0–63)
+bits 15–12:  promotion piece type (0 = none, 1–4 = N/B/R/Q)
+bits 31–16:  flags (capture, en passant, castling, double push, promotion)
 ```
 
-A few examples:
-
-```
-e2e4  (double pawn push):
-  from=12  to=28  flag=double_push
-
-e7e8q  (promotion to queen):
-  from=52  to=60  promo=3  flag=promo
-
-e1g1  (kingside castling):
-  from=4   to=6   flag=castle
-```
+The `make_move(from, to, promo, flags)` macro packs these fields. `MOVE_FROM(m)` and `MOVE_TO(m)` extract them. Flags are bitfield constants defined in `types.h`.
 
 ---
 
-## Perft Validation
+## Piece Attack Tables
 
-Perft counts every legal position reachable at a given search depth. It is the
-standard correctness test for a move generator — the counts have been established
-independently by hundreds of engines and any deviation points directly to a bug.
-
-```
-Starting position, first few depths:
-
-Depth 0:     1 node   (just the root)
-Depth 1:    20 nodes  (16 pawn moves + 4 knight moves)
-Depth 2:   400 nodes  (20 * 20 -- each side has 20 choices)
-Depth 3: 8,902 nodes  (first captures and en passant appear here)
-```
-
-The implementation is pseudo-legal: generate all candidate moves first, then
-filter out any that leave the moving side's king in check.
+Knight and king attacks are fully precomputed into 64-element arrays at startup by `init_tables()` in `bitboard.c`. For each square, the set of reachable squares is computed geometrically and stored:
 
 ```c
-uint64_t perft(Position *pos, int depth) {
-    if (depth == 0) return 1;
-
-    MoveList list;
-    generate_moves(pos, &list);
-
-    uint64_t nodes = 0;
-    UndoInfo undo;
-
-    for (int i = 0; i < list.count; i++) {
-        do_move(pos, list.moves[i], &undo);
-        if (!is_in_check(pos, pos->side ^ 1))
-            nodes += perft(pos, depth - 1);
-        undo_move(pos, &undo);
-    }
-    return nodes;
-}
+// Knight attacks from square sq
+for each of the 8 L-shaped offsets:
+    target = sq + offset
+    if target is on the board and not on the wrong side of the wrap:
+        KNIGHT_ATTACKS[sq] |= bb_sq(target)
 ```
 
-### Starting position
+Pawn attacks are stored separately by color: `PAWN_ATTACKS[WHITE][sq]` and `PAWN_ATTACKS[BLACK][sq]`, because pawns attack differently depending on which direction they move.
+
+---
+
+## Pawn Move Generation
+
+Pawn moves are generated using bitboard shift arithmetic, not loops:
 
 ```
-  Depth    Nodes          Time
-  -----    -----------    ----
-  1        20             <1 ms
-  2        400            <1 ms
-  3        8,902          <1 ms
-  4        197,281        ~4 ms
-  5        4,865,609      ~96 ms
-  6        119,060,324    ~2663 ms   (~45 Mnodes/s)
+Single push (white):  (pawns << 8) & ~occupied
+Double push (white):  (single_push & RANK_3) << 8 & ~occupied
+Capture left:         (pawns << 7) & ~FILE_H & enemy
+Capture right:        (pawns << 9) & ~FILE_A & enemy
+En passant:           same shifts applied to ep_square mask
 ```
 
-### Kiwipete
+Promotions are detected by checking if the destination rank is rank 8 (white) or rank 1 (black). Promoting pawns emit four moves (one per promotion piece). `FILE_A` and `FILE_H` masks prevent captures from wrapping off the edge of the board.
 
-A well-known stress-test position that exercises castling, en passant captures,
-and promotions all at once.
+---
+
+## Pseudo-Legal vs Legal Move Generation
+
+cbitboard generates **pseudo-legal** moves: all moves that are geometrically valid but without checking whether the moving side's king is left in check. Pseudo-legal generation is faster because it avoids the check-detection step on every candidate move.
+
+Legality is enforced in the perft loop: after `do_move`, the generator checks whether the side that just moved left its king in check (using `is_in_check`). If so, the move is discarded and `undo_move` is called. This is the standard approach for perft drivers; it does not reflect what a full engine would do in a search.
+
+---
+
+## Perft Testing
+
+Perft (performance test) counts the number of leaf nodes at a given depth from a position. It is the standard correctness test for move generators: if perft(pos, depth) matches the known result for that position, the move generator and make/unmake implementation are correct for all positions reachable at that depth.
+
+cbitboard validates to perft depth 6 from the starting position:
+
+| Depth | Nodes |
+|-------|-------|
+| 1 | 20 |
+| 2 | 400 |
+| 3 | 8,902 |
+| 4 | 197,281 |
+| 5 | 4,865,609 |
+| 6 | 119,060,324 |
+
+These are the universally agreed-upon node counts from the chess programming community (chessprogramming.org). Any deviation indicates a bug.
+
+**Perft divide** breaks the depth-1 result down by root move, showing how many nodes each first move contributes. This is the primary tool for isolating discrepancies when perft results don't match.
+
+---
+
+## FEN Parsing
+
+The Forsyth–Edwards Notation (FEN) is the standard format for describing a chess position. A FEN string has six fields separated by spaces:
 
 ```
-r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -
-
-  a  b  c  d  e  f  g  h
-+--+--+--+--+--+--+--+--+
-| r|  |  |  | k|  |  | r|  8
-| p|  | p| p| q| p| b|  |  7
-| b| n|  |  | p| n| p|  |  6
-|  |  |  | P| N|  |  |  |  5
-|  | p|  |  | P|  |  |  |  4
-|  |  | N|  |  | Q|  | p|  3
-| P| P| P| B| B| P| P| P|  2
-| R|  |  |  | K|  |  | R|  1
-+--+--+--+--+--+--+--+--+
-
-  Depth    Nodes
-  -----    ---------
-  1        48
-  2        2,039
-  3        97,862
-  4        4,085,603
+rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
+│                          │         │     │ │ │  │
+│                          │         │     │ │ │  └ fullmove number
+│                          │         │     │ │ └ halfmove clock
+│                          │         │     │ └ en passant target square (or -)
+│                          │         └─────┘ castling availability
+│                          └ active color (w/b)
+└ piece placement (rank 8 to rank 1, / between ranks)
 ```
 
-The `divide` command breaks down results by root move, which is how bugs get
-isolated -- compare each line against a trusted engine until you find the
-first number that disagrees:
+`parse_fen()` in `position.c` reads all six fields, populates the `Position` struct, and calls `refresh_occupancy()` to derive the aggregate bitboards.
+
+---
+
+## Make/Unmake and Undo
+
+`do_move(pos, m, &undo)` applies a move to the position in place. Before modifying anything, it saves the current state into a `UndoInfo` struct: captured piece type, en passant square, castling rights, and halfmove clock. This makes `undo_move(pos, &undo)` an exact reversal — it restores all saved fields.
+
+The make/unmake cycle handles:
+- Quiet moves and captures
+- En passant captures (remove the captured pawn from a different square than the destination)
+- Castling (move both king and rook atomically)
+- Double pawn pushes (set the en passant target square)
+- Promotions (replace pawn with the promoted piece)
+
+---
+
+## Project Layout
 
 ```
-$ ./cbitboard "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -" divide 1
-
-a2a3: 1     d5d6: 1     f3f4: 1
-a2a4: 1     d5e6: 1     f3g3: 1
-b2b3: 1     e4e5: 1     f3h3: 1
-c2c3: 1     c3b1: 1     f3g4: 1
-g2g3: 1     c3a4: 1     f3h5: 1
-g2g4: 1     c3b5: 1     f3f6: 1
-g2h3: 1     c3d1: 1     e1d1: 1
-d2c1: 1     c3e2: 1     e1f1: 1
-d2e3: 1     e5d3: 1     e1g1: 1   <- kingside castle
-d2f4: 1     e5g6: 1     e1c1: 1   <- queenside castle
-d2g5: 1     e5c4: 1
-d2h6: 1     e5g4: 1
-
-Total: 48
+C-BitBoard/
+├── Makefile
+├── src/
+│   ├── types.h        Fundamental types: Bitboard, Move, Color, Piece, Position, UndoInfo
+│   ├── bitboard.h     Rank/file masks, precomputed tables, HQ inline functions
+│   ├── bitboard.c     Table initialization (knight/king/pawn/diagonal/rank lookup)
+│   ├── position.h     FEN parser, do_move, undo_move, print_board, print_move_uci
+│   ├── position.c     Position implementation
+│   ├── movegen.h      generate_moves, is_in_check declarations
+│   ├── movegen.c      Full pseudo-legal move generation for all piece types
+│   └── main.c         CLI: perft, perft divide, board print, timing
+└── README.md
 ```
 
 ---
 
-## Build and Usage
+## Building
 
-```sh
-# Release build
+**Release build (optimized, `-O3 -march=native`):**
+
+```bash
 make
-
-# Debug build (AddressSanitizer + UndefinedBehaviorSanitizer)
-make debug
-
-# Perft from starting position
-./cbitboard <depth>
-
-# Perft from a FEN string
-./cbitboard "<fen>" <depth>
-
-# Perft divide
-./cbitboard "<fen>" divide <depth>
-
-# Print the board
-./cbitboard board ["<fen>"]
 ```
 
-```sh
-# Some examples
+**Debug build (no optimization, AddressSanitizer + UBSanitizer):**
+
+```bash
+make debug
+```
+
+The debug build links `-fsanitize=address,undefined`. Run perft at shallow depths (1–4) under the debug build to catch memory errors and undefined behavior.
+
+**Clean:**
+
+```bash
+make clean
+```
+
+**Compiler requirements:** GCC or Clang with C11 support. The code uses `__builtin_ctzll`, `__builtin_popcountll`, and `__builtin_bswap64` — all available on any x86_64 GCC/Clang.
+
+---
+
+## Usage
+
+```bash
+# Run perft from startpos to depth 5
 ./cbitboard 5
-./cbitboard "" 6
+
+# Run perft from a custom FEN to depth 4
 ./cbitboard "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -" 4
+
+# Perft divide (root move breakdown) from startpos at depth 3
 ./cbitboard divide 3
+
+# Perft divide from a custom FEN
+./cbitboard "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -" divide 4
+
+# Print the board for a FEN (for visual inspection)
+./cbitboard board "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3"
+
+# Print startpos board
 ./cbitboard board
 ```
 
+### Sample perft output
+
+```
+FEN:   rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
+Depth: 6
+
+Nodes: 119060324
+Time:  841.3 ms  (141.5 Mnodes/s)
+```
+
+### Sample perft divide output
+
+```
+Perft divide depth 3
+
+a2a3: 380
+b2b3: 420
+c2c3: 420
+d2d3: 539
+e2e3: 599
+f2f3: 380
+g2g3: 420
+h2h3: 380
+a2a4: 420
+...
+Total: 8902
+```
+
 ---
 
-## Project Structure
+## Known Perft Results
 
-```
-cbitboard/
-├── Makefile
-├── README.md
-└── src/
-    ├── types.h       Position, Move encoding, MoveList, UndoInfo
-    ├── bitboard.h    Inline bit ops, Hyperbola Quintessence, table declarations
-    ├── bitboard.c    Precomputed tables: knight, king, pawn attacks, rank LUT
-    ├── movegen.c     Pawn, knight, slider, and castling move generation
-    ├── position.c    FEN parser, make/unmake, board printer, UCI output
-    └── main.c        Perft driver with timing, perft divide
-```
+The following positions are standard move generator test vectors from the [Chess Programming Wiki](https://www.chessprogramming.org/Perft_Results):
+
+**Position 1 — Starting position**
+
+| Depth | Nodes |
+|-------|-------|
+| 1 | 20 |
+| 2 | 400 |
+| 3 | 8,902 |
+| 4 | 197,281 |
+| 5 | 4,865,609 |
+| 6 | 119,060,324 |
+
+**Position 2 — Kiwipete (exercises all special moves)**
+`r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -`
+
+| Depth | Nodes |
+|-------|-------|
+| 1 | 48 |
+| 2 | 2,039 |
+| 3 | 97,862 |
+| 4 | 4,085,603 |
+| 5 | 193,690,690 |
+
+---
+
+## License
+
+MIT License — see [LICENSE](LICENSE).
+
+Copyright (c) 2026 Dakoda Stemen
