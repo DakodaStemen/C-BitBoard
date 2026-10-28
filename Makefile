@@ -26,4 +26,9 @@ clean:
 bench: $(TARGET)
 	./tests/bench.sh ./$(TARGET)
 
-.PHONY: debug test clean bench
+# make sprt BASE=./old-binary [NEW=./cbitboard]   (needs fastchess on PATH or FASTCHESS=...)
+sprt: $(TARGET)
+	@test -n "$(BASE)" || { echo "usage: make sprt BASE=<baseline binary> [NEW=./$(TARGET)]"; exit 2; }
+	./tools/sprt.sh "$(BASE)" "$(or $(NEW),./$(TARGET))"
+
+.PHONY: debug test clean bench sprt
