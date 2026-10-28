@@ -137,6 +137,11 @@ static int qsearch(Position *pos, int alpha, int beta, int ply) {
 static int to_tt(int s, int ply)   { return s >= MATE_BOUND ? s + ply : s <= -MATE_BOUND ? s - ply : s; }
 static int from_tt(int s, int ply) { return s >= MATE_BOUND ? s - ply : s <= -MATE_BOUND ? s + ply : s; }
 
+#define RFP_MAX_DEPTH 6
+#define RFP_MARGIN    90      /* cp per ply */
+#define ASP_START     5       /* first iteration that uses an aspiration window */
+#define ASP_DELTA     25
+
 static int negamax(Position *pos, int depth, int alpha, int beta, int ply, int allow_null) {
     pv_len[ply] = 0;
     if (ply > 0) {
@@ -174,6 +179,11 @@ static int negamax(Position *pos, int depth, int alpha, int beta, int ply, int a
     }
 
     int static_eval = in_check ? 0 : evaluate(pos);
+
+    /* reverse futility pruning: static eval so far above beta that a shallow search won't change it */
+    if (!is_pv && !in_check && depth <= RFP_MAX_DEPTH && beta < MATE_BOUND && beta > -MATE_BOUND &&
+        static_eval - RFP_MARGIN * depth >= beta && has_non_pawn(pos, us))
+        return static_eval - RFP_MARGIN * depth;
 
     /* null-move pruning */
     if (allow_null && !is_pv && !in_check && depth >= 3 && static_eval >= beta &&
@@ -294,7 +304,24 @@ SearchResult search_go(Position *pos, const Limits *lim,
     res.best = root.moves[0];      /* fallback */
 
     for (int d = 1; d <= max_depth; d++) {
-        int score = negamax(pos, d, -INF_SCORE, INF_SCORE, 0, 0);
+        int score, alpha = -INF_SCORE, beta = INF_SCORE, delta = ASP_DELTA;
+        if (d >= ASP_START) {
+            alpha = res.score - delta; if (alpha < -INF_SCORE) alpha = -INF_SCORE;
+            beta  = res.score + delta; if (beta  >  INF_SCORE) beta  =  INF_SCORE;
+        }
+        for (;;) {
+            score = negamax(pos, d, alpha, beta, 0, 0);
+            if (stopped) break;
+            if (score <= alpha && alpha > -INF_SCORE) {          /* fail low: widen downwards */
+                beta  = (alpha + beta) / 2;
+                alpha = score - delta; if (alpha < -INF_SCORE) alpha = -INF_SCORE;
+            } else if (score >= beta && beta < INF_SCORE) {      /* fail high: widen upwards */
+                beta  = score + delta; if (beta > INF_SCORE) beta = INF_SCORE;
+                if (pv_len[0] > 0) res.best = pv[0][0];
+            } else break;
+            delta += delta / 2 + 5;
+            if (score >= MATE_BOUND || score <= -MATE_BOUND) { alpha = -INF_SCORE; beta = INF_SCORE; }
+        }
         if (stopped && d > 1) break;
         if (pv_len[0] > 0) res.best = pv[0][0];
         res.score = score; res.depth = d;
