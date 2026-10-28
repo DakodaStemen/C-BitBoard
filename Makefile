@@ -20,6 +20,9 @@ test: $(TARGET)
 	./tests/bench.sh ./$(TARGET)
 	python3 tests/uci_test.py ./$(TARGET)
 
+slider-bench:
+	$(CC) -std=c11 -O3 -march=native -Isrc tools/slider_bench.c src/bitboard.c -o slider_bench && ./slider_bench
+
 clean:
 	rm -f $(TARGET)
 
@@ -31,4 +34,4 @@ sprt: $(TARGET)
 	@test -n "$(BASE)" || { echo "usage: make sprt BASE=<baseline binary> [NEW=./$(TARGET)]"; exit 2; }
 	./tools/sprt.sh "$(BASE)" "$(or $(NEW),./$(TARGET))"
 
-.PHONY: debug test clean bench sprt
+.PHONY: debug test clean bench sprt slider-bench
