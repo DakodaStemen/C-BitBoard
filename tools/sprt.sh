@@ -19,7 +19,7 @@ mkdir -p "$ROOT/sprt-out"
 exec "$FASTCHESS" \
   -engine cmd="$NEW"  name=candidate \
   -engine cmd="$BASE" name=baseline \
-  -each tc="$TC" option.Hash="$HASH" ${EXTRA:-} \
+  -each ${TC:+tc="$TC"} option.Hash="$HASH" ${EXTRA:-} \
   -openings file="$ROOT/${BOOK:-tools/openings.epd}" format=epd order=random \
   -srand "${SEED:-42}" -repeat -games 2 -rounds "${ROUNDS:-20000}" \
   -concurrency "$CONC" -recover \
