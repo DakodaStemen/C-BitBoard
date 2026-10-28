@@ -8,10 +8,58 @@ on:
 
 jobs:
   build:
+    name: Build (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (warnings are errors)
+        run: make clean && make CC=${{ matrix.cc }} NATIVE=0 CFLAGS="-std=c11 -Wall -Wextra -Werror -O3"
+      - name: Smoke test
+        run: |
+          ./cbitboard 4 | tee /dev/stderr | grep -q "Nodes: 197281"
+
+  sanitizers:
+    name: ASan + UBSan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build
-        run: make clean && make
-      - name: Perft
-        run: ./cbitboard 5
+      - run: make debug
+      - name: Perft + search under sanitizers
+        run: |
+          ./cbitboard 4
+          ./cbitboard bench 5
+
+  perft:
+    name: Perft suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make NATIVE=0
+      - name: Standard positions (startpos, Kiwipete, CPW 3-6)
+        run: ./tests/perft_suite.sh ./cbitboard quick | tee -a "$GITHUB_STEP_SUMMARY"
+
+  uci:
+    name: UCI conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install chess
+      - run: make NATIVE=0
+      - run: python tests/uci_test.py ./cbitboard
+
+  bench:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make NATIVE=0
+      - name: Search bench + perft speed
+        run: |
+          { echo '### Search bench'; echo '```'; ./cbitboard bench 9; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo '### Perft speed'; ./tests/perft_suite.sh ./cbitboard quick; } | tee -a "$GITHUB_STEP_SUMMARY"

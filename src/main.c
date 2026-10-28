@@ -8,6 +8,7 @@
 #include "bitboard.h"
 #include "position.h"
 #include "movegen.h"
+#include "engine.h"
 
 /* ── Perft ───────────────────────────────────────────────────────────────── */
 
@@ -68,6 +69,8 @@ static void usage(const char *prog) {
         "  %s [fen] <depth>          -- run perft\n"
         "  %s [fen] divide <depth>   -- run perft divide\n"
         "  %s board [fen]            -- print board\n"
+        "  %s uci                    -- UCI engine (also the default with no args)\n"
+        "  %s bench [depth]          -- fixed-depth search benchmark\n"
         "\n"
         "  fen defaults to startpos when omitted or empty string.\n"
         "\nExamples:\n"
@@ -75,15 +78,19 @@ static void usage(const char *prog) {
         "  %s \"\" 6\n"
         "  %s \"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -\" 4\n"
         "  %s board\n",
-        prog, prog, prog, prog, prog, prog, prog);
+        prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 /* ── main ────────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
     init_tables();
+    init_zobrist();
 
-    if (argc < 2) { usage(argv[0]); return 1; }
+    /* No arguments (how GUIs launch engines) or "uci": speak UCI on stdin. */
+    if (argc < 2 || strcmp(argv[1], "uci") == 0) { uci_loop(); return 0; }
+    if (strcmp(argv[1], "bench") == 0) { run_bench(argc > 2 ? atoi(argv[2]) : 8); return 0; }
+    if (strcmp(argv[1], "help") == 0 || strcmp(argv[1], "--help") == 0) { usage(argv[0]); return 0; }
 
     /* Determine FEN and remaining args */
     const char *fen = STARTPOS_FEN;
