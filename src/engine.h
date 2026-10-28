@@ -11,8 +11,9 @@ Move     parse_uci_move(Position *pos, const char *str);   /* 0 if illegal */
 void     move_to_str(Move m, char *buf);                   /* buf >= 6 bytes */
 
 /* ── Zobrist hashing (zobrist.c) ─────────────────────────────────────────── */
-void     init_zobrist(void);
-uint64_t pos_hash(const Position *pos);
+void     init_zobrist(void);                 /* idempotent: same keys every call */
+uint64_t pos_hash(const Position *pos);      /* full recompute (reference / FEN setup) */
+extern uint64_t ZOB_PIECE[2][6][64], ZOB_SIDE, ZOB_CASTLE[16], ZOB_EP[8];
 
 /* ── Evaluation (eval.c): centipawns from side-to-move's point of view ───── */
 #define PIECE_VALUE_MG(pt) (PIECE_VALUES[pt])

@@ -2,6 +2,7 @@
 #include <string.h>
 #include "position.h"
 #include "bitboard.h"
+#include "engine.h"
 
 /* ── Occupancy helpers ───────────────────────────────────────────────────── */
 
@@ -106,6 +107,7 @@ int parse_fen(Position *pos, const char *fen) {
     }
 
     refresh_occupancy(pos);
+    pos->hash = pos_hash(pos);
     return 0;
 }
 
@@ -146,6 +148,8 @@ void do_move(Position *pos, Move m, UndoInfo *undo) {
     undo->castling       = pos->castling;
     undo->halfmove       = pos->halfmove;
     undo->captured_type  = -1;
+    undo->hash           = pos->hash;
+    uint64_t h = pos->hash;
 
     /* Identify moving piece */
     int mpt = piece_on(pos, us, from);
@@ -155,22 +159,28 @@ void do_move(Position *pos, Move m, UndoInfo *undo) {
         /* Captured pawn is behind the to-square */
         int cap_sq = (us == WHITE) ? to - 8 : to + 8;
         pos->pieces[them][PAWN] &= ~bb_sq(cap_sq);
+        h ^= ZOB_PIECE[them][PAWN][cap_sq];
         undo->captured_type = PAWN;
     } else if (MOVE_IS_CAPTURE(m)) {
         int cpt = piece_on(pos, them, to);
         if (cpt >= 0) {
             pos->pieces[them][cpt] &= ~bb_sq(to);
+            h ^= ZOB_PIECE[them][cpt][to];
             undo->captured_type = cpt;
         }
     }
 
     /* Move the piece */
     pos->pieces[us][mpt] &= ~bb_sq(from);
+    h ^= ZOB_PIECE[us][mpt][from];
     if (MOVE_IS_PROMO(m)) {
         static const int PROMO_TO_PT[4] = { KNIGHT, BISHOP, ROOK, QUEEN };
-        pos->pieces[us][PROMO_TO_PT[MOVE_PROMO(m)]] |= bb_sq(to);
+        int ppt = PROMO_TO_PT[MOVE_PROMO(m)];
+        pos->pieces[us][ppt] |= bb_sq(to);
+        h ^= ZOB_PIECE[us][ppt][to];
     } else {
         pos->pieces[us][mpt] |= bb_sq(to);
+        h ^= ZOB_PIECE[us][mpt][to];
     }
 
     /* Handle castling: also move the rook */
@@ -178,23 +188,31 @@ void do_move(Position *pos, Move m, UndoInfo *undo) {
         if (to == G1) { /* white kingside */
             pos->pieces[WHITE][ROOK] &= ~bb_sq(H1);
             pos->pieces[WHITE][ROOK] |=  bb_sq(F1);
+            h ^= ZOB_PIECE[WHITE][ROOK][H1] ^ ZOB_PIECE[WHITE][ROOK][F1];
         } else if (to == C1) { /* white queenside */
             pos->pieces[WHITE][ROOK] &= ~bb_sq(A1);
             pos->pieces[WHITE][ROOK] |=  bb_sq(D1);
+            h ^= ZOB_PIECE[WHITE][ROOK][A1] ^ ZOB_PIECE[WHITE][ROOK][D1];
         } else if (to == G8) { /* black kingside */
             pos->pieces[BLACK][ROOK] &= ~bb_sq(H8);
             pos->pieces[BLACK][ROOK] |=  bb_sq(F8);
+            h ^= ZOB_PIECE[BLACK][ROOK][H8] ^ ZOB_PIECE[BLACK][ROOK][F8];
         } else if (to == C8) { /* black queenside */
             pos->pieces[BLACK][ROOK] &= ~bb_sq(A8);
             pos->pieces[BLACK][ROOK] |=  bb_sq(D8);
+            h ^= ZOB_PIECE[BLACK][ROOK][A8] ^ ZOB_PIECE[BLACK][ROOK][D8];
         }
     }
 
     /* Update castling rights */
+    h ^= ZOB_CASTLE[pos->castling & 15];
     pos->castling &= cr_mask(from) & cr_mask(to);
+    h ^= ZOB_CASTLE[pos->castling & 15];
 
     /* Update en passant square */
+    if (pos->ep_sq != NO_SQ) h ^= ZOB_EP[SQ_FILE(pos->ep_sq)];
     pos->ep_sq = MOVE_IS_DP(m) ? (us == WHITE ? from + 8 : from - 8) : NO_SQ;
+    if (pos->ep_sq != NO_SQ) h ^= ZOB_EP[SQ_FILE(pos->ep_sq)];
 
     /* Half-move clock */
     if (mpt == PAWN || MOVE_IS_CAPTURE(m) || MOVE_IS_EP(m))
@@ -207,6 +225,7 @@ void do_move(Position *pos, Move m, UndoInfo *undo) {
 
     /* Flip side */
     pos->side = them;
+    pos->hash = h ^ ZOB_SIDE;
 
     refresh_occupancy(pos);
 }
@@ -227,6 +246,7 @@ void undo_move(Position *pos, const UndoInfo *undo) {
     pos->ep_sq    = undo->ep_sq;
     pos->castling = undo->castling;
     pos->halfmove = undo->halfmove;
+    pos->hash     = undo->hash;
     if (us == BLACK) pos->fullmove--;
 
     /* Determine what piece is currently on `to` (after promotion it's promo piece) */

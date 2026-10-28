@@ -116,7 +116,7 @@ static int qsearch(Position *pos, int alpha, int beta, int ply) {
         Move m = l.moves[i];
         do_move(pos, m, &u);
         if (is_in_check(pos, us)) { undo_move(pos, &u); continue; }
-        hstack[hlen++] = pos_hash(pos);
+        hstack[hlen++] = pos->hash;
         int s = -qsearch(pos, -beta, -alpha, ply + 1);
         hlen--;
         undo_move(pos, &u);
@@ -176,12 +176,15 @@ static int negamax(Position *pos, int depth, int alpha, int beta, int ply, int a
     if (allow_null && !is_pv && !in_check && depth >= 3 && static_eval >= beta &&
         has_non_pawn(pos, us) && beta < MATE_BOUND) {
         int saved_ep = pos->ep_sq;
+        uint64_t saved_hash = pos->hash;
+        pos->hash ^= ZOB_SIDE;
+        if (saved_ep != NO_SQ) pos->hash ^= ZOB_EP[SQ_FILE(saved_ep)];
         pos->side = us ^ 1; pos->ep_sq = NO_SQ;
         int saved_hm = pos->halfmove; pos->halfmove++;
-        hstack[hlen++] = pos_hash(pos);
+        hstack[hlen++] = pos->hash;
         int s = -negamax(pos, depth - 1 - (2 + depth / 4), -beta, -beta + 1, ply + 1, 0);
         hlen--;
-        pos->side = us; pos->ep_sq = saved_ep; pos->halfmove = saved_hm;
+        pos->side = us; pos->ep_sq = saved_ep; pos->halfmove = saved_hm; pos->hash = saved_hash;
         if (stopped) return 0;
         if (s >= beta) return s >= MATE_BOUND ? beta : s;
     }
@@ -202,7 +205,7 @@ static int negamax(Position *pos, int depth, int alpha, int beta, int ply, int a
         do_move(pos, m, &u);
         if (is_in_check(pos, us)) { undo_move(pos, &u); continue; }
         legal++;
-        hstack[hlen++] = pos_hash(pos);
+        hstack[hlen++] = pos->hash;
 
         int s, r = 0;
         if (legal > 4 && depth >= 3 && quiet && !in_check) r = 1 + (legal > 10) + (depth > 6);
@@ -266,7 +269,7 @@ SearchResult search_go(Position *pos, const Limits *lim,
     if (hist_len > 2048) { hist += hist_len - 2048; hist_len = 2048; }
     if (hist_len > 0) memcpy(hstack, hist, hist_len * sizeof(uint64_t));
     hlen = hist_len;
-    hstack[hlen++] = pos_hash(pos);
+    hstack[hlen++] = pos->hash;
 
     t_start = now_ms();
     double soft = 1e18, hard = 1e18;

@@ -91,7 +91,7 @@ static void set_position(const char *args) {
         Move m = parse_uci_move(&game, tok);
         if (!m) { printf("info string illegal move %s\n", tok); break; }
         UndoInfo u;
-        if (ghlen < 4095) ghist[ghlen++] = pos_hash(&game);
+        if (ghlen < 4095) ghist[ghlen++] = game.hash;
         do_move(&game, m, &u);
     }
 }
