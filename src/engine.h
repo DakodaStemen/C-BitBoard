@@ -62,6 +62,8 @@ typedef struct {
 /* poll() is called periodically; returns nonzero if search should stop. */
 void search_init(void);
 void search_new_game(void);
+#define DEFAULT_MOVE_OVERHEAD 10
+void search_set_move_overhead(int ms);   /* ms reserved per move for GUI/lag latency */
 /* hist[0..hist_len-1] = hashes of earlier game positions (excl. current). */
 SearchResult search_go(Position *pos, const Limits *lim,
                        const uint64_t *hist, int hist_len,
@@ -69,6 +71,6 @@ SearchResult search_go(Position *pos, const Limits *lim,
 
 /* ── UCI (uci.c) ─────────────────────────────────────────────────────────── */
 void uci_loop(void);
-void run_bench(int depth);
+void run_bench(int depth);   /* depth <= 0: default */
 
 #endif

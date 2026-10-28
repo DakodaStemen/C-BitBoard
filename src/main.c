@@ -107,7 +107,7 @@ int main(int argc, char **argv) {
 
     /* No arguments (how GUIs launch engines) or "uci": speak UCI on stdin. */
     if (argc < 2 || strcmp(argv[1], "uci") == 0) { uci_loop(); return 0; }
-    if (strcmp(argv[1], "bench") == 0) { run_bench(argc > 2 ? atoi(argv[2]) : 8); return 0; }
+    if (strcmp(argv[1], "bench") == 0) { run_bench(argc > 2 ? atoi(argv[2]) : 0); return 0; }
     if (strcmp(argv[1], "help") == 0 || strcmp(argv[1], "--help") == 0) { usage(argv[0]); return 0; }
 
     /* Determine FEN and remaining args */

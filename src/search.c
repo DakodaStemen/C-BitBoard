@@ -26,6 +26,9 @@ static double now_ms(void) {
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
+static int move_overhead = DEFAULT_MOVE_OVERHEAD;
+void search_set_move_overhead(int ms) { move_overhead = ms; }
+
 void search_init(void) { init_zobrist(); tt_resize(64); }
 void search_new_game(void) {
     tt_clear();
@@ -273,12 +276,14 @@ SearchResult search_go(Position *pos, const Limits *lim,
 
     t_start = now_ms();
     double soft = 1e18, hard = 1e18;
-    if (lim->movetime_ms) { soft = hard = lim->movetime_ms - 5; if (soft < 1) soft = hard = 1; }
+    if (lim->movetime_ms) { soft = hard = lim->movetime_ms - move_overhead; if (soft < 1) soft = hard = 1; }
     else if (lim->time_ms && !lim->infinite) {
         int mtg = lim->movestogo > 0 ? lim->movestogo : 30;
-        double base = lim->time_ms / (double)mtg + lim->inc_ms * 0.75;
+        double avail = lim->time_ms - move_overhead;
+        if (avail < 1) avail = 1;
+        double base = avail / (double)mtg + lim->inc_ms * 0.75;
         soft = base;
-        hard = base * 3; if (hard > lim->time_ms * 0.5) hard = lim->time_ms * 0.5;
+        hard = base * 3; if (hard > avail * 0.5) hard = avail * 0.5;
         if (hard < 2) hard = 2;
         if (soft > hard) soft = hard;
     }

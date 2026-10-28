@@ -17,9 +17,13 @@ debug: clean $(TARGET)
 
 test: $(TARGET)
 	./tests/perft_suite.sh ./$(TARGET) quick
+	./tests/bench.sh ./$(TARGET)
 	python3 tests/uci_test.py ./$(TARGET)
 
 clean:
 	rm -f $(TARGET)
 
-.PHONY: debug test clean
+bench: $(TARGET)
+	./tests/bench.sh ./$(TARGET)
+
+.PHONY: debug test clean bench
