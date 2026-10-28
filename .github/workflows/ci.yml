@@ -19,7 +19,8 @@ jobs:
       - name: Build (warnings are errors)
         run: make clean && make CC=${{ matrix.cc }} NATIVE=0 CFLAGS="-std=c11 -Wall -Wextra -Werror -O3"
       - name: Smoke test
-        run: ./cbitboard 4 | tee /dev/stderr | grep -q "Nodes: 197281"
+        run: |
+          ./cbitboard 4 | tee /dev/stderr | grep -q "Nodes: 197281"
 
   sanitizers:
     name: ASan + UBSan
