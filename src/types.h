@@ -91,6 +91,7 @@ typedef struct {
     uint8_t  castling;       /* castling availability bitmask */
     int      halfmove;       /* half-move clock (50-move rule) */
     int      fullmove;       /* full-move number */
+    uint64_t hash;           /* Zobrist key, maintained incrementally by do_move */
 } Position;
 
 /* ── Undo information ────────────────────────────────────────────────────── */
@@ -101,6 +102,7 @@ typedef struct {
     uint8_t castling;
     int     halfmove;
     int     captured_type;   /* PieceType of captured piece, or -1 */
+    uint64_t hash;           /* Zobrist key before the move */
 } UndoInfo;
 
 /* ── Move list ───────────────────────────────────────────────────────────── */

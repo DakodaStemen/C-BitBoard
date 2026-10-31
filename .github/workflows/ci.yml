@@ -31,6 +31,7 @@ jobs:
       - name: Perft + search under sanitizers
         run: |
           ./cbitboard 4
+          ./cbitboard "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -" hashcheck 3
           ./cbitboard bench 5
 
   perft:
@@ -41,6 +42,11 @@ jobs:
       - run: make NATIVE=0
       - name: Standard positions (startpos, Kiwipete, CPW 3-6)
         run: ./tests/perft_suite.sh ./cbitboard quick | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Incremental Zobrist == recompute (every perft node)
+        run: |
+          ./cbitboard "" hashcheck 4 | tee /dev/stderr | grep -q "Hash mismatches: 0"
+          ./cbitboard "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -" hashcheck 4 | grep -q "Hash mismatches: 0"
+          ./cbitboard "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1" hashcheck 4 | grep -q "Hash mismatches: 0"
 
   uci:
     name: UCI conformance
@@ -59,7 +65,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: make NATIVE=0
+      - name: Bench signature (deterministic node count, tests/bench_nodes.txt)
+        run: ./tests/bench.sh ./cbitboard
       - name: Search bench + perft speed
         run: |
-          { echo '### Search bench'; echo '```'; ./cbitboard bench 9; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo '### Search bench'; echo '```'; ./cbitboard bench; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
           { echo '### Perft speed'; ./tests/perft_suite.sh ./cbitboard quick; } | tee -a "$GITHUB_STEP_SUMMARY"

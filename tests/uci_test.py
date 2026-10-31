@@ -64,5 +64,14 @@ while not b.is_game_over(claim_draw=True) and moves < 200:
     assert r.move in b.legal_moves, (b.fen(), r.move)
     b.push(r.move); moves += 1
 check("self-play: all moves legal", True, f"{moves} plies, result {b.result(claim_draw=True)}")
+# 8. Options advertised and accepted: Hash, Clear Hash (button), Move Overhead
+check("advertises Clear Hash + Move Overhead", "Clear Hash" in eng.options and "Move Overhead" in eng.options)
+eng.configure({"Move Overhead": 100, "Clear Hash": None, "Hash": 16})
+t = time.time(); eng.play(chess.Board(), chess.engine.Limit(time=0.3))
+check("movetime respects Move Overhead=100 (still within limit)", time.time() - t < 0.3, f"{time.time()-t:.3f}s")
+eng.configure({"Move Overhead": 10})
+# 9. 'bench' over UCI emits the signature line
+o = subprocess.run([BIN], input="bench 4\nquit\n", capture_output=True, text=True).stdout
+check("UCI 'bench' prints signature", "Bench signature: depth 4 nodes" in o)
 eng.quit()
 print("ALL PASS" if ok else "SOME FAILED"); sys.exit(0 if ok else 1)

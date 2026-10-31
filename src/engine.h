@@ -11,8 +11,9 @@ Move     parse_uci_move(Position *pos, const char *str);   /* 0 if illegal */
 void     move_to_str(Move m, char *buf);                   /* buf >= 6 bytes */
 
 /* ── Zobrist hashing (zobrist.c) ─────────────────────────────────────────── */
-void     init_zobrist(void);
-uint64_t pos_hash(const Position *pos);
+void     init_zobrist(void);                 /* idempotent: same keys every call */
+uint64_t pos_hash(const Position *pos);      /* full recompute (reference / FEN setup) */
+extern uint64_t ZOB_PIECE[2][6][64], ZOB_SIDE, ZOB_CASTLE[16], ZOB_EP[8];
 
 /* ── Evaluation (eval.c): centipawns from side-to-move's point of view ───── */
 #define PIECE_VALUE_MG(pt) (PIECE_VALUES[pt])
@@ -61,6 +62,8 @@ typedef struct {
 /* poll() is called periodically; returns nonzero if search should stop. */
 void search_init(void);
 void search_new_game(void);
+#define DEFAULT_MOVE_OVERHEAD 10
+void search_set_move_overhead(int ms);   /* ms reserved per move for GUI/lag latency */
 /* hist[0..hist_len-1] = hashes of earlier game positions (excl. current). */
 SearchResult search_go(Position *pos, const Limits *lim,
                        const uint64_t *hist, int hist_len,
@@ -68,6 +71,6 @@ SearchResult search_go(Position *pos, const Limits *lim,
 
 /* ── UCI (uci.c) ─────────────────────────────────────────────────────────── */
 void uci_loop(void);
-void run_bench(int depth);
+void run_bench(int depth);   /* depth <= 0: default */
 
 #endif

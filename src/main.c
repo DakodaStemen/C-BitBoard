@@ -31,6 +31,23 @@ static uint64_t perft(Position *pos, int depth) {
     return nodes;
 }
 
+/* Perft that asserts the incremental Zobrist key equals a full recompute at every node. */
+static uint64_t hashcheck(Position *pos, int depth, uint64_t *bad) {
+    if (pos->hash != pos_hash(pos)) { (*bad)++; }
+    if (depth == 0) return 1;
+    MoveList list;
+    generate_moves(pos, &list);
+    uint64_t nodes = 0;
+    UndoInfo undo;
+    for (int i = 0; i < list.count; i++) {
+        do_move(pos, list.moves[i], &undo);
+        if (!is_in_check(pos, pos->side ^ 1)) nodes += hashcheck(pos, depth - 1, bad);
+        undo_move(pos, &undo);
+        if (pos->hash != undo.hash) (*bad)++;
+    }
+    return nodes;
+}
+
 /* ── Perft divide (root move breakdown, great for debugging) ─────────────── */
 
 static void perft_divide(Position *pos, int depth) {
@@ -71,6 +88,7 @@ static void usage(const char *prog) {
         "  %s board [fen]            -- print board\n"
         "  %s uci                    -- UCI engine (also the default with no args)\n"
         "  %s bench [depth]          -- fixed-depth search benchmark\n"
+        "  %s [fen] hashcheck <d>    -- verify incremental Zobrist == recompute over perft(d)\n"
         "\n"
         "  fen defaults to startpos when omitted or empty string.\n"
         "\nExamples:\n"
@@ -78,7 +96,7 @@ static void usage(const char *prog) {
         "  %s \"\" 6\n"
         "  %s \"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -\" 4\n"
         "  %s board\n",
-        prog, prog, prog, prog, prog, prog, prog, prog, prog);
+        prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 /* ── main ────────────────────────────────────────────────────────────────── */
@@ -89,7 +107,7 @@ int main(int argc, char **argv) {
 
     /* No arguments (how GUIs launch engines) or "uci": speak UCI on stdin. */
     if (argc < 2 || strcmp(argv[1], "uci") == 0) { uci_loop(); return 0; }
-    if (strcmp(argv[1], "bench") == 0) { run_bench(argc > 2 ? atoi(argv[2]) : 8); return 0; }
+    if (strcmp(argv[1], "bench") == 0) { run_bench(argc > 2 ? atoi(argv[2]) : 0); return 0; }
     if (strcmp(argv[1], "help") == 0 || strcmp(argv[1], "--help") == 0) { usage(argv[0]); return 0; }
 
     /* Determine FEN and remaining args */
@@ -120,6 +138,14 @@ int main(int argc, char **argv) {
     if (parse_fen(&pos, fen) != 0) {
         fprintf(stderr, "Invalid FEN: %s\n", fen);
         return 1;
+    }
+
+    if (strcmp(argv[arg], "hashcheck") == 0) {
+        if (arg + 1 >= argc) { usage(argv[0]); return 1; }
+        uint64_t bad = 0;
+        uint64_t n = hashcheck(&pos, atoi(argv[arg + 1]), &bad);
+        printf("Nodes: %llu\nHash mismatches: %llu\n", (unsigned long long)n, (unsigned long long)bad);
+        return bad ? 1 : 0;
     }
 
     /* "divide" command */

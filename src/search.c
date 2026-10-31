@@ -26,6 +26,9 @@ static double now_ms(void) {
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
+static int move_overhead = DEFAULT_MOVE_OVERHEAD;
+void search_set_move_overhead(int ms) { move_overhead = ms; }
+
 void search_init(void) { init_zobrist(); tt_resize(64); }
 void search_new_game(void) {
     tt_clear();
@@ -116,7 +119,7 @@ static int qsearch(Position *pos, int alpha, int beta, int ply) {
         Move m = l.moves[i];
         do_move(pos, m, &u);
         if (is_in_check(pos, us)) { undo_move(pos, &u); continue; }
-        hstack[hlen++] = pos_hash(pos);
+        hstack[hlen++] = pos->hash;
         int s = -qsearch(pos, -beta, -alpha, ply + 1);
         hlen--;
         undo_move(pos, &u);
@@ -133,6 +136,11 @@ static int qsearch(Position *pos, int alpha, int beta, int ply) {
 
 static int to_tt(int s, int ply)   { return s >= MATE_BOUND ? s + ply : s <= -MATE_BOUND ? s - ply : s; }
 static int from_tt(int s, int ply) { return s >= MATE_BOUND ? s - ply : s <= -MATE_BOUND ? s + ply : s; }
+
+#define RFP_MAX_DEPTH 6
+#define RFP_MARGIN    90      /* cp per ply */
+#define ASP_START     5       /* first iteration that uses an aspiration window */
+#define ASP_DELTA     25
 
 static int negamax(Position *pos, int depth, int alpha, int beta, int ply, int allow_null) {
     pv_len[ply] = 0;
@@ -172,16 +180,24 @@ static int negamax(Position *pos, int depth, int alpha, int beta, int ply, int a
 
     int static_eval = in_check ? 0 : evaluate(pos);
 
+    /* reverse futility pruning: static eval so far above beta that a shallow search won't change it */
+    if (!is_pv && !in_check && depth <= RFP_MAX_DEPTH && beta < MATE_BOUND && beta > -MATE_BOUND &&
+        static_eval - RFP_MARGIN * depth >= beta && has_non_pawn(pos, us))
+        return static_eval - RFP_MARGIN * depth;
+
     /* null-move pruning */
     if (allow_null && !is_pv && !in_check && depth >= 3 && static_eval >= beta &&
         has_non_pawn(pos, us) && beta < MATE_BOUND) {
         int saved_ep = pos->ep_sq;
+        uint64_t saved_hash = pos->hash;
+        pos->hash ^= ZOB_SIDE;
+        if (saved_ep != NO_SQ) pos->hash ^= ZOB_EP[SQ_FILE(saved_ep)];
         pos->side = us ^ 1; pos->ep_sq = NO_SQ;
         int saved_hm = pos->halfmove; pos->halfmove++;
-        hstack[hlen++] = pos_hash(pos);
+        hstack[hlen++] = pos->hash;
         int s = -negamax(pos, depth - 1 - (2 + depth / 4), -beta, -beta + 1, ply + 1, 0);
         hlen--;
-        pos->side = us; pos->ep_sq = saved_ep; pos->halfmove = saved_hm;
+        pos->side = us; pos->ep_sq = saved_ep; pos->halfmove = saved_hm; pos->hash = saved_hash;
         if (stopped) return 0;
         if (s >= beta) return s >= MATE_BOUND ? beta : s;
     }
@@ -202,7 +218,7 @@ static int negamax(Position *pos, int depth, int alpha, int beta, int ply, int a
         do_move(pos, m, &u);
         if (is_in_check(pos, us)) { undo_move(pos, &u); continue; }
         legal++;
-        hstack[hlen++] = pos_hash(pos);
+        hstack[hlen++] = pos->hash;
 
         int s, r = 0;
         if (legal > 4 && depth >= 3 && quiet && !in_check) r = 1 + (legal > 10) + (depth > 6);
@@ -266,16 +282,18 @@ SearchResult search_go(Position *pos, const Limits *lim,
     if (hist_len > 2048) { hist += hist_len - 2048; hist_len = 2048; }
     if (hist_len > 0) memcpy(hstack, hist, hist_len * sizeof(uint64_t));
     hlen = hist_len;
-    hstack[hlen++] = pos_hash(pos);
+    hstack[hlen++] = pos->hash;
 
     t_start = now_ms();
     double soft = 1e18, hard = 1e18;
-    if (lim->movetime_ms) { soft = hard = lim->movetime_ms - 5; if (soft < 1) soft = hard = 1; }
+    if (lim->movetime_ms) { soft = hard = lim->movetime_ms - move_overhead; if (soft < 1) soft = hard = 1; }
     else if (lim->time_ms && !lim->infinite) {
         int mtg = lim->movestogo > 0 ? lim->movestogo : 30;
-        double base = lim->time_ms / (double)mtg + lim->inc_ms * 0.75;
+        double avail = lim->time_ms - move_overhead;
+        if (avail < 1) avail = 1;
+        double base = avail / (double)mtg + lim->inc_ms * 0.75;
         soft = base;
-        hard = base * 3; if (hard > lim->time_ms * 0.5) hard = lim->time_ms * 0.5;
+        hard = base * 3; if (hard > avail * 0.5) hard = avail * 0.5;
         if (hard < 2) hard = 2;
         if (soft > hard) soft = hard;
     }
@@ -286,7 +304,24 @@ SearchResult search_go(Position *pos, const Limits *lim,
     res.best = root.moves[0];      /* fallback */
 
     for (int d = 1; d <= max_depth; d++) {
-        int score = negamax(pos, d, -INF_SCORE, INF_SCORE, 0, 0);
+        int score, alpha = -INF_SCORE, beta = INF_SCORE, delta = ASP_DELTA;
+        if (d >= ASP_START) {
+            alpha = res.score - delta; if (alpha < -INF_SCORE) alpha = -INF_SCORE;
+            beta  = res.score + delta; if (beta  >  INF_SCORE) beta  =  INF_SCORE;
+        }
+        for (;;) {
+            score = negamax(pos, d, alpha, beta, 0, 0);
+            if (stopped) break;
+            if (score <= alpha && alpha > -INF_SCORE) {          /* fail low: widen downwards */
+                beta  = (alpha + beta) / 2;
+                alpha = score - delta; if (alpha < -INF_SCORE) alpha = -INF_SCORE;
+            } else if (score >= beta && beta < INF_SCORE) {      /* fail high: widen upwards */
+                beta  = score + delta; if (beta > INF_SCORE) beta = INF_SCORE;
+                if (pv_len[0] > 0) res.best = pv[0][0];
+            } else break;
+            delta += delta / 2 + 5;
+            if (score >= MATE_BOUND || score <= -MATE_BOUND) { alpha = -INF_SCORE; beta = INF_SCORE; }
+        }
         if (stopped && d > 1) break;
         if (pv_len[0] > 0) res.best = pv[0][0];
         res.score = score; res.depth = d;

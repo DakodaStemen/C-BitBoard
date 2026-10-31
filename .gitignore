@@ -1,2 +1,4 @@
 cbitboard
 *.o
+sprt-out/
+slider_bench

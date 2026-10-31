@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/select.h>
 #include <time.h>
@@ -65,6 +66,32 @@ static int poll_stop(void) {
     return 0;
 }
 
+/* "setoption name <Name with spaces> [value <V>]" — names are case-insensitive. */
+static void set_option(const char *args) {
+    const char *n = strstr(args, "name ");
+    if (!n) return;
+    n += 5;
+    while (*n == ' ') n++;
+    const char *v = strstr(n, " value ");
+    size_t nlen = v ? (size_t)(v - n) : strlen(n);
+    while (nlen && n[nlen - 1] == ' ') nlen--;
+    char name[64];
+    if (nlen >= sizeof name) return;
+    memcpy(name, n, nlen); name[nlen] = 0;
+    int val = v ? atoi(v + 7) : 0;
+    if (!strcasecmp(name, "Hash")) {
+        if (val < 1) val = 1;
+        if (val > 4096) val = 4096;
+        tt_resize((size_t)val);
+    } else if (!strcasecmp(name, "Clear Hash")) {
+        tt_clear();
+    } else if (!strcasecmp(name, "Move Overhead")) {
+        if (val < 0) val = 0;
+        if (val > 5000) val = 5000;
+        search_set_move_overhead(val);
+    }
+}
+
 /* ── Game state ──────────────────────────────────────────────────────────── */
 
 static Position game;
@@ -91,7 +118,7 @@ static void set_position(const char *args) {
         Move m = parse_uci_move(&game, tok);
         if (!m) { printf("info string illegal move %s\n", tok); break; }
         UndoInfo u;
-        if (ghlen < 4095) ghist[ghlen++] = pos_hash(&game);
+        if (ghlen < 4095) ghist[ghlen++] = game.hash;
         do_move(&game, m, &u);
     }
 }
@@ -136,15 +163,15 @@ void uci_loop(void) {
         if (!strcmp(line, "uci")) {
             printf("id name %s\nid author Dakoda Stemen\n", ENGINE_NAME);
             printf("option name Hash type spin default 64 min 1 max 4096\n");
+            printf("option name Clear Hash type button\n");
+            printf("option name Move Overhead type spin default %d min 0 max 5000\n", DEFAULT_MOVE_OVERHEAD);
             printf("uciok\n");
         } else if (!strcmp(line, "isready")) printf("readyok\n");
         else if (!strcmp(line, "ucinewgame")) search_new_game();
         else if (!strncmp(line, "position ", 9)) set_position(line + 9);
         else if (!strncmp(line, "go", 2)) do_go(line + 2);
-        else if (!strncmp(line, "setoption", 9)) {
-            char *n = strstr(line, "name Hash"), *v = strstr(line, "value");
-            if (n && v) { tt_resize((size_t)atoi(v + 5)); }
-        } else if (!strcmp(line, "d")) print_board(&game);
+        else if (!strncmp(line, "setoption", 9)) set_option(line + 9); else if (!strncmp(line, "bench", 5)) run_bench(line[5] ? atoi(line + 5) : 0);
+        else if (!strcmp(line, "d")) print_board(&game);
         else if (!strcmp(line, "quit")) break;
         fflush(stdout);
     }
@@ -163,7 +190,10 @@ static const char *BENCH_FENS[] = {
     "6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1",
 };
 
+#define BENCH_DEFAULT_DEPTH 9
+
 void run_bench(int depth) {
+    if (depth <= 0) depth = BENCH_DEFAULT_DEPTH;
     search_init();
     uint64_t total = 0; double ms = 0;
     for (size_t i = 0; i < sizeof BENCH_FENS / sizeof *BENCH_FENS; i++) {
@@ -178,4 +208,8 @@ void run_bench(int depth) {
     }
     printf("\nTotal nodes: %llu\nTime: %.0f ms\nNPS: %.0f\n", (unsigned long long)total, ms,
            ms > 0 ? total / ms * 1000 : 0.0);
+    /* Stable signature line: fixed-depth search is deterministic, so this must not
+       change unless search/eval behaviour changes (see tests/bench.sh). */
+    printf("Bench signature: depth %d nodes %llu\n", depth, (unsigned long long)total);
+    fflush(stdout);
 }
